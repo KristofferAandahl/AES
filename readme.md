@@ -1,0 +1,1 @@
+This repository contains a simple implementation of AES-128. The implementation is verified using a cryptol spesification made by Galois.
