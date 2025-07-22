@@ -1,0 +1,457 @@
+import "AES.cry";
+
+// HELPERS ###################################################################
+let fresh_array4 n = do {
+    arr_p <- jvm_alloc_array 4 java_byte;
+    arr <- jvm_fresh_var n (java_array 4 java_byte);
+    jvm_array_is arr_p arr ;
+    return (arr_p, arr);
+};
+
+let fresh_array16 n = do {
+    arr_p <- jvm_alloc_array 16 java_byte;
+    arr <- jvm_fresh_var n (java_array 16 java_byte);
+    jvm_array_is arr_p arr ;
+    return (arr_p, arr);
+};
+
+let fresh_state n = do {
+    (row1_p, row1) <- fresh_array4 (str_concat n "_1");
+    (row2_p, row2) <- fresh_array4 (str_concat n "_2");
+    (row3_p, row3) <- fresh_array4 (str_concat n "_3");
+    (row4_p, row4) <- fresh_array4 (str_concat n "_4");
+
+    obj <- jvm_alloc_array 4 (java_array 4 java_byte);
+    let state = {{[
+        row1, row2, row3, row4
+    ]}};
+    jvm_elem_is obj 0 row1_p;
+    jvm_elem_is obj 1 row2_p;
+    jvm_elem_is obj 2 row3_p;
+    jvm_elem_is obj 3 row4_p;
+    return (obj, state);
+};
+
+let written_state n state = do {
+    r1 <- jvm_alloc_array 4 java_byte;
+    r2 <- jvm_alloc_array 4 java_byte;
+    r3 <- jvm_alloc_array 4 java_byte;
+    r4 <- jvm_alloc_array 4 java_byte;
+    jvm_array_is r1 {{state @ 0}};
+    jvm_array_is r2 {{state @ 1}};
+    jvm_array_is r3 {{state @ 2}};
+    jvm_array_is r4 {{state @ 3}};
+    obj <- jvm_alloc_array 4 (java_array 4 java_byte);
+    jvm_elem_is obj 0 r1;
+    jvm_elem_is obj 1 r2;
+    jvm_elem_is obj 2 r3;
+    jvm_elem_is obj 3 r4;
+    return obj;
+};
+
+// GF28 ##################################################################
+gf28 <- java_load_class "GF28";
+
+let mult_spec = do {
+    x <- jvm_fresh_var "x" java_byte;
+    y <- jvm_fresh_var "y" java_byte;
+
+    jvm_execute_func [jvm_term x, jvm_term y];
+
+    jvm_return (jvm_term {{gf28Mult (x, y)}});
+};
+
+let dot_spec = do {
+    (xsp, xs) <- fresh_array4 "dot_xs";
+    (ysp, ys) <- fresh_array4 "dot_ys";
+
+    jvm_execute_func [xsp, ysp];
+
+    jvm_return (jvm_term {{gf28DotProduct (xs, ys)}});
+};
+
+let transpose_spec = do {
+    (obj, state) <- fresh_state "transpose";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{transpose state}};
+    out <- written_state "transpose_out" out_state;
+    jvm_return out;
+};
+
+let matrix_multiplication = do {
+    (a, a_state) <- fresh_state "matrix_multiplication_a";
+    (b, b_state) <- fresh_state "matrix_multiplication_b";
+
+    jvm_execute_func [a, b];
+
+    let out_state = {{gf28MatrixMult (a_state, b_state)}};
+    out <- written_state "matrix_multiplication_out" out_state;
+
+    jvm_return out;
+};
+
+mult <- jvm_verify gf28 "multiply" [] false mult_spec abc;
+dot <- jvm_verify gf28 "dot" [mult] false dot_spec abc;
+transpose <- jvm_verify gf28 "transpose" [] false transpose_spec abc;
+matrix <- jvm_verify gf28 "matrixMultiply" [dot, transpose] false matrix_multiplication z3;
+
+// SBox ##################################################################
+sbox <- java_load_class "SBox";
+let sbox_spec = do {
+    input <- jvm_fresh_var "in" java_byte;
+
+    jvm_execute_func [jvm_term input];
+
+    jvm_return (jvm_term {{SubByte' input}});
+};
+
+let inv_sbox_spec = do {
+    input <- jvm_fresh_var "in" java_byte;
+
+    jvm_execute_func [jvm_term input];
+
+    jvm_return (jvm_term {{InvSubByte' input}});
+};
+
+sbox_lookup <- jvm_verify sbox "subByte" [] false sbox_spec abc;
+sbox_inv <- jvm_verify sbox "invSubByte" [] false inv_sbox_spec abc;
+
+// Key ##################################################################
+key <- java_load_class "Key";
+let rconst_spec = do {
+    round <- jvm_fresh_var "round" java_byte;
+
+    jvm_precond {{1 <= round /\ round <= 10}};
+
+    jvm_execute_func [jvm_term round];
+
+    out <- jvm_alloc_array 4 java_byte;
+    jvm_array_is out {{Rcon' round}};
+
+    jvm_return out;
+};
+
+let next_word__spec = do {
+    i <- jvm_fresh_var "i" java_byte;
+    (prevp, prev) <- fresh_array4 "next_word_prev";
+    (oldp, old) <- fresh_array4 "next_word_old";
+
+    jvm_precond {{4 <= i /\ i < 44}};
+
+    jvm_execute_func [jvm_term i, prevp, oldp];
+
+    out <- jvm_alloc_array 4 java_byte;
+    jvm_array_is out {{NextWord (i, prev, old)}};
+
+    jvm_return out;
+};
+
+let key_epxansion_spec = do {
+    keyp <- jvm_alloc_array 16 java_byte;
+    key <- jvm_fresh_var "key" (java_array 16 java_byte);
+    jvm_array_is keyp key;
+
+    jvm_execute_func [keyp];
+
+    let out_key = {{ExpandKey (join key)}};
+    key0 <- written_state "k0" {{out_key.0}};
+    key1 <- written_state "k1" {{out_key.1 @ 0}};
+    key2 <- written_state "k2" {{out_key.1 @ 1}};
+    key3 <- written_state "k3" {{out_key.1 @ 2}};
+    key4 <- written_state "k4" {{out_key.1 @ 3}};
+    key5 <- written_state "k5" {{out_key.1 @ 4}};
+    key6 <- written_state "k6" {{out_key.1 @ 5}};
+    key7 <- written_state "k7" {{out_key.1 @ 6}};
+    key8 <- written_state "k8" {{out_key.1 @ 7}};
+    key9 <- written_state "k9" {{out_key.1 @ 8}};
+    key10 <- written_state "k10" {{out_key.2}};
+
+    out <- jvm_alloc_array 11 (java_array 4 (java_array 4 java_byte));
+    jvm_elem_is out 0 key0;
+    jvm_elem_is out 1 key1;
+    jvm_elem_is out 2 key2;
+    jvm_elem_is out 3 key3;
+    jvm_elem_is out 4 key4;
+    jvm_elem_is out 5 key5;
+    jvm_elem_is out 6 key6;
+    jvm_elem_is out 7 key7;
+    jvm_elem_is out 8 key8;
+    jvm_elem_is out 9 key9;
+    jvm_elem_is out 10 key10;
+    jvm_return out;
+};
+
+rcon <- jvm_verify key "getRcon" [] false rconst_spec abc;
+next_word <- jvm_verify key "nextWord" [sbox_lookup, rcon] false next_word__spec abc;
+key_expansion <- jvm_verify key "keyExpansion" [next_word, transpose] false key_epxansion_spec abc;
+
+// AES ######################################################################
+aes <- java_load_class "AES";
+
+let shift_rows_spec = do {
+    (obj, state) <- fresh_state "shift_rows";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{ShiftRows state}};
+    out <- written_state "shift_rows_out" out_state;
+
+    jvm_return out;
+};
+
+let inv_shift_rows_spec = do {
+    (obj, state) <- fresh_state "inv_shift_rows";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{InvShiftRows state}};
+    out <- written_state "inv_shift_rows_out" out_state;
+
+    jvm_return out;
+};
+
+let mix_columns_spec = do {
+    (obj, state) <- fresh_state "mix_columns";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{MixColumns state}};
+    out <- written_state "mix_columns_out" out_state;
+
+    jvm_return out;
+};
+
+let inv_mix_columns_spec = do {
+    (obj, state) <- fresh_state "inv_mix_columns";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{InvMixColumns state}};
+    out <- written_state "inv_mix_columns_out" out_state;
+
+    jvm_return out;
+};
+
+let sub_bytes_spec = do {
+    (obj, state) <- fresh_state "sub_bytes";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{SubBytes state}};
+    out <- written_state "sub_bytes_out" out_state;
+
+    jvm_return out;
+};
+
+let inv_sub_bytes_spec = do {
+    (obj, state) <- fresh_state "inv_sub_bytes";
+
+    jvm_execute_func [obj];
+
+    let out_state = {{InvSubBytes state}};
+    out <- written_state "inv_sub_bytes_out" out_state;
+
+    jvm_return out;
+};
+
+let add_round_key_spec = do {
+    (obj, state) <- fresh_state "add_round_key";
+    (key_obj, key_state) <- fresh_state "add_round_key_key";
+
+    jvm_execute_func [obj, key_obj];
+
+    let out_state = {{AddRoundKey (state, key_state)}};
+    out <- written_state "add_round_key_out" out_state;
+
+    jvm_return out;
+};
+
+let round_spec = do {
+    (state_obj, state) <- fresh_state "round";
+    (key_obj, key_state) <- fresh_state "round_key";
+
+    jvm_execute_func [state_obj, key_obj];
+
+    let out_state = {{AESRound (key_state, state)}};
+    out <- written_state "round_out" out_state;
+
+    jvm_return out;
+};
+
+let inv_round_spec = do {
+    (state_obj, state) <- fresh_state "inv_round";
+    (key_obj, key_state) <- fresh_state "inv_round_key";
+
+    jvm_execute_func [state_obj, key_obj];
+
+    let out_state = {{AESInvRound (key_state, state)}};
+    out <- written_state "inv_round_out" out_state;
+
+    jvm_return out;
+};
+
+let rounds_spec = do {
+    (state_obj, state) <- fresh_state "rounds";
+    (k0_obj, k0_state) <- fresh_state "rounds_k0";
+    (k1_obj, k1_state) <- fresh_state "rounds_k1";
+    (k2_obj, k2_state) <- fresh_state "rounds_k2";
+    (k3_obj, k3_state) <- fresh_state "rounds_k3";
+    (k4_obj, k4_state) <- fresh_state "rounds_k4";
+    (k5_obj, k5_state) <- fresh_state "rounds_k5";
+    (k6_obj, k6_state) <- fresh_state "rounds_k6";
+    (k7_obj, k7_state) <- fresh_state "rounds_k7";
+    (k8_obj, k8_state) <- fresh_state "rounds_k8";
+
+    key_obj <- jvm_alloc_array 9 (java_array 4 (java_array 4 java_byte));
+    jvm_elem_is key_obj 0 k0_obj;
+    jvm_elem_is key_obj 1 k1_obj;
+    jvm_elem_is key_obj 2 k2_obj;
+    jvm_elem_is key_obj 3 k3_obj;
+    jvm_elem_is key_obj 4 k4_obj;
+    jvm_elem_is key_obj 5 k5_obj;
+    jvm_elem_is key_obj 6 k6_obj;
+    jvm_elem_is key_obj 7 k7_obj;
+    jvm_elem_is key_obj 8 k8_obj;
+
+    let key = {{[
+        k0_state, k1_state, k2_state, k3_state, k4_state,
+        k5_state, k6_state, k7_state, k8_state
+    ]}};
+
+    jvm_execute_func [state_obj, key_obj];
+    let out_state = {{ rounds ! 0 
+            where rounds = [state] # [ AESRound (rk, s) | rk <- key | s <- rounds]}};
+    out <- written_state "rounds_out" out_state;
+    jvm_return out;
+};
+
+let inv_rounds_spec = do {
+    (state_obj, state) <- fresh_state "inv_rounds";
+    (k0_obj, k0_state) <- fresh_state "inv_rounds_k0";
+    (k1_obj, k1_state) <- fresh_state "inv_rounds_k1";
+    (k2_obj, k2_state) <- fresh_state "inv_rounds_k2";
+    (k3_obj, k3_state) <- fresh_state "inv_rounds_k3";
+    (k4_obj, k4_state) <- fresh_state "inv_rounds_k4";
+    (k5_obj, k5_state) <- fresh_state "inv_rounds_k5";
+    (k6_obj, k6_state) <- fresh_state "inv_rounds_k6";
+    (k7_obj, k7_state) <- fresh_state "inv_rounds_k7";
+    (k8_obj, k8_state) <- fresh_state "inv_rounds_k8";
+
+    key_obj <- jvm_alloc_array 9 (java_array 4 (java_array 4 java_byte));
+    jvm_elem_is key_obj 0 k0_obj;
+    jvm_elem_is key_obj 1 k1_obj;
+    jvm_elem_is key_obj 2 k2_obj;
+    jvm_elem_is key_obj 3 k3_obj;
+    jvm_elem_is key_obj 4 k4_obj;
+    jvm_elem_is key_obj 5 k5_obj;
+    jvm_elem_is key_obj 6 k6_obj;
+    jvm_elem_is key_obj 7 k7_obj;
+    jvm_elem_is key_obj 8 k8_obj;
+
+    let key = {{[
+        k0_state, k1_state, k2_state, k3_state, k4_state,
+        k5_state, k6_state, k7_state, k8_state
+    ]}};
+
+    jvm_execute_func [state_obj, key_obj];
+    let out_state = {{ inv_rounds ! 0 
+            where inv_rounds = [state] # [ AESInvRound (rk, s) | rk <- reverse key | s <- inv_rounds]}};
+    out <- written_state "inv_rounds_out" out_state;
+    jvm_return out;
+};
+
+let final_round_spec = do {
+    (state_obj, state) <- fresh_state "final_round";
+    (key_obj, key_state) <- fresh_state "final_round_key";
+
+    jvm_execute_func [state_obj, key_obj];
+
+    let out_state = {{AESFinalRound (key_state, state)}};
+    out <- written_state "final_round_out" out_state;
+
+    jvm_return out;
+};
+
+let inv_final_round_spec = do {
+    (state_obj, state) <- fresh_state "inv_final_round";
+    (key_obj, key_state) <- fresh_state "inv_final_round_key";
+
+    jvm_execute_func [state_obj, key_obj];
+
+    let out_state = {{AESFinalInvRound (key_state, state)}};
+    out <- written_state "inv_final_round_out" out_state;
+
+    jvm_return out;
+};
+
+let msg_to_state_spec = do {
+    (msgp, msg) <- fresh_array16 "msg_to_state_msg";
+
+    jvm_execute_func [msgp];
+
+    let out_state = {{msgToState (join msg)}};
+    out <- written_state "msg_to_state_out" out_state;
+
+    jvm_return out;
+};
+
+let state_to_msg_spec = do {
+    (state_obj, state) <- fresh_state "state_to_msg";
+
+    jvm_execute_func [state_obj];
+
+    let out_msg = {{split (stateToMsg state) : [16][8]}};
+    out <- jvm_alloc_array 16 java_byte;
+    jvm_array_is out out_msg;
+
+    jvm_return out;
+};
+
+let encryption_spec = do {
+    (msgp, msg) <- fresh_array16 "encryption_msg";
+    (keyp, key) <- fresh_array16 "encryption_key";
+    jvm_execute_func [msgp, keyp];
+
+    let out_state = {{split (aesEncrypt ((join msg), (join key))) : [16][8]}};
+    out <- jvm_alloc_array 16 java_byte;
+    jvm_array_is out out_state;
+
+    jvm_return out;
+};
+
+let decryption_spec = do {
+    (msgp, msg) <- fresh_array16 "decryption_msg";
+    (keyp, key) <- fresh_array16 "decryption_key";
+    jvm_execute_func [msgp, keyp];
+
+    let out_state = {{split (aesDecrypt ((join msg), (join key))) : [16][8]}};
+    out <- jvm_alloc_array 16 java_byte;
+    jvm_array_is out out_state;
+
+    jvm_return out;
+};
+
+shift_rows <- jvm_verify aes "shiftRows" [] false shift_rows_spec abc;
+mix_columns <- jvm_verify aes "mixColumns" [matrix] false mix_columns_spec abc;
+sub_bytes <- jvm_verify aes "subBytes" [sbox_lookup] false sub_bytes_spec abc;
+add_round_key <- jvm_verify aes "addRoundKey" [] false add_round_key_spec abc;
+
+inv_shift_rows <- jvm_verify aes "invShiftRows" [] false inv_shift_rows_spec abc;
+inv_mix_columns <- jvm_verify aes "invMixColumns" [matrix] false inv_mix_columns_spec abc;
+inv_sub_bytes <- jvm_verify aes "invSubBytes" [sbox_inv] false inv_sub_bytes_spec abc;
+
+round <- jvm_verify aes "aesRound" [add_round_key, sub_bytes, shift_rows, mix_columns] false round_spec abc;
+rounds <- jvm_verify aes "aesRounds" [round] false rounds_spec abc;
+
+inv_round <- jvm_verify aes "invRound" [add_round_key, inv_sub_bytes, inv_shift_rows, inv_mix_columns] false inv_round_spec abc;
+inv_rounds <- jvm_verify aes "aesInvRounds" [inv_round] false inv_rounds_spec abc;
+
+final_round <- jvm_verify aes "aesFinalRound" [add_round_key, sub_bytes, shift_rows] false final_round_spec abc;
+inv_final_round <- jvm_verify aes "invFinalRound" [add_round_key, inv_sub_bytes, inv_shift_rows] false inv_final_round_spec abc;
+
+msg_to_state <- jvm_verify aes "msgToState" [] false msg_to_state_spec abc;
+state_to_msg <- jvm_verify aes "stateToMsg" [transpose] false state_to_msg_spec abc;
+encryption <- jvm_verify aes "encrypt" [key_expansion, add_round_key, rounds, final_round, msg_to_state, state_to_msg] false encryption_spec abc;
+decrypt <- jvm_verify aes "decrypt" [key_expansion, add_round_key, inv_rounds, inv_final_round, msg_to_state, state_to_msg] false decryption_spec abc;
